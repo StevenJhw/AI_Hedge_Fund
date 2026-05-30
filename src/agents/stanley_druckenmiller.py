@@ -16,6 +16,7 @@ from src.utils.progress import progress
 from src.utils.llm import call_llm
 import statistics
 from src.utils.api_key import get_api_key_from_state
+from src.utils.data_context import get_data_context
 
 class StanleyDruckenmillerSignal(BaseModel):
     signal: Literal["bullish", "bearish", "neutral"]
@@ -86,6 +87,16 @@ def stanley_druckenmiller_agent(state: AgentState, agent_id: str = "stanley_druc
 
         progress.update_status(agent_id, ticker, "Fetching recent price data for momentum")
         prices = get_prices(ticker, start_date=start_date, end_date=end_date, api_key=api_key)
+
+        # Early exit if no data was fetched
+        if not metrics and not financial_line_items and market_cap is None:
+            druck_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: no financial metrics, line items, or market cap available",
+            }
+            progress.update_status(agent_id, ticker, "Done", analysis="Insufficient data")
+            continue
 
         progress.update_status(agent_id, ticker, "Analyzing growth & momentum")
         growth_momentum_analysis = analyze_growth_and_momentum(financial_line_items, prices)
@@ -584,6 +595,9 @@ def generate_druckenmiller_output(
         ]
     )
 
+    data_ctx = get_data_context(state, ticker)
+    if data_ctx:
+        analysis_data["_data_context"] = data_ctx
     prompt = template.invoke({"analysis_data": json.dumps(analysis_data, indent=2), "ticker": ticker})
 
     def create_default_signal():

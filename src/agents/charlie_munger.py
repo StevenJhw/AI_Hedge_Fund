@@ -8,6 +8,7 @@ from typing_extensions import Literal
 from src.utils.progress import progress
 from src.utils.llm import call_llm
 from src.utils.api_key import get_api_key_from_state
+from src.utils.data_context import get_data_context
 
 class CharlieMungerSignal(BaseModel):
     signal: Literal["bullish", "bearish", "neutral"]
@@ -77,6 +78,16 @@ def charlie_munger_agent(state: AgentState, agent_id: str = "charlie_munger_agen
             api_key=api_key,
         )
         
+        # Early exit if no data was fetched
+        if not metrics and not financial_line_items and market_cap is None:
+            munger_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: no financial metrics, line items, or market cap available",
+            }
+            progress.update_status(agent_id, ticker, "Done", analysis="Insufficient data")
+            continue
+
         progress.update_status(agent_id, ticker, "Analyzing moat strength")
         moat_analysis = analyze_moat_strength(metrics, financial_line_items)
         
@@ -820,27 +831,31 @@ def generate_munger_output(
     agent_id: str,
     confidence_hint: int,
 ) -> CharlieMungerSignal:
-    facts_bundle = make_munger_facts_bundle(analysis_data)
+    data_ctx = get_data_context(state, ticker)
+    if data_ctx:
+        analysis_data["_data_context"] = data_ctx
     template = ChatPromptTemplate.from_messages([
         ("system",
-         "You are Charlie Munger. Decide bullish, bearish, or neutral using only the facts. "
+         "You are Charlie Munger. Decide bullish, bearish, or neutral using all provided data.\n"
+         "Checklist: moat quality, management integrity, earnings predictability, fair-value margin, "
+         "industry tailwinds/headwinds (from _data_context if present).\n"
          "Return JSON only. Keep reasoning under 120 characters. "
          "Use the provided confidence exactly; do not change it."),
         ("human",
          "Ticker: {ticker}\n"
-         "Facts:\n{facts}\n"
+         "Analysis Data:\n{analysis_data}\n"
          "Confidence: {confidence}\n"
          "Return exactly:\n"
-         "{{\n"  # escaped {
+         "{{\n"
          '  "signal": "bullish" | "bearish" | "neutral",\n'
          f'  "confidence": {confidence_hint},\n'
          '  "reasoning": "short justification"\n'
-         "}}")  # escaped }
+         "}}")
     ])
 
     prompt = template.invoke({
         "ticker": ticker,
-        "facts": json.dumps(facts_bundle, separators=(",", ":"), ensure_ascii=False),
+        "analysis_data": json.dumps(analysis_data, indent=2),
         "confidence": confidence_hint,
     })
 

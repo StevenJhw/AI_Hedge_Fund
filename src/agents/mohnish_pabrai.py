@@ -8,6 +8,7 @@ from typing_extensions import Literal
 from src.utils.progress import progress
 from src.utils.llm import call_llm
 from src.utils.api_key import get_api_key_from_state
+from src.utils.data_context import get_data_context
 
 
 class MohnishPabraiSignal(BaseModel):
@@ -64,6 +65,16 @@ def mohnish_pabrai_agent(state: AgentState, agent_id: str = "mohnish_pabrai_agen
 
         progress.update_status(agent_id, ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date, api_key=api_key)
+
+        # Early exit if no data was fetched
+        if not metrics and not line_items and market_cap is None:
+            pabrai_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: no financial metrics, line items, or market cap available",
+            }
+            progress.update_status(agent_id, ticker, "Done", analysis="Insufficient data")
+            continue
 
         progress.update_status(agent_id, ticker, "Analyzing downside protection")
         downside = analyze_downside_protection(line_items)
@@ -343,6 +354,9 @@ def generate_pabrai_output(
         ),
     ])
 
+    data_ctx = get_data_context(state, ticker)
+    if data_ctx:
+        analysis_data["_data_context"] = data_ctx
     prompt = template.invoke({
         "analysis_data": json.dumps(analysis_data, indent=2),
         "ticker": ticker,

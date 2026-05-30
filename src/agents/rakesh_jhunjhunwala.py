@@ -8,6 +8,7 @@ from src.tools.api import get_financial_metrics, get_market_cap, search_line_ite
 from src.utils.llm import call_llm
 from src.utils.progress import progress
 from src.utils.api_key import get_api_key_from_state
+from src.utils.data_context import get_data_context
 
 class RakeshJhunjhunwalaSignal(BaseModel):
     signal: Literal["bullish", "bearish", "neutral"]
@@ -54,6 +55,16 @@ def rakesh_jhunjhunwala_agent(state: AgentState, agent_id: str = "rakesh_jhunjhu
 
         progress.update_status(agent_id, ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date, api_key=api_key)
+
+        # Early exit if no data was fetched
+        if not metrics and not financial_line_items and market_cap is None:
+            jhunjhunwala_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: no financial metrics, line items, or market cap available",
+            }
+            progress.update_status(agent_id, ticker, "Done", analysis="Insufficient data")
+            continue
 
         # ─── Analyses ───────────────────────────────────────────────────────────
         progress.update_status(agent_id, ticker, "Analyzing growth")
@@ -693,6 +704,9 @@ def generate_jhunjhunwala_output(
         ]
     )
 
+    data_ctx = get_data_context(state, ticker)
+    if data_ctx:
+        analysis_data["_data_context"] = data_ctx
     prompt = template.invoke({"analysis_data": json.dumps(analysis_data, indent=2), "ticker": ticker})
 
     # Default fallback signal in case parsing fails

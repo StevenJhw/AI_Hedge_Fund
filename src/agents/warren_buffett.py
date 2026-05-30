@@ -1,19 +1,61 @@
 from src.graph.state import AgentState, show_agent_reasoning
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 import json
 from typing_extensions import Literal
 from src.tools.api import get_financial_metrics, get_market_cap, search_line_items
 from src.utils.llm import call_llm
 from src.utils.progress import progress
 from src.utils.api_key import get_api_key_from_state
+from src.utils.data_context import get_data_context
+
+# Alternate field names the LLM sometimes uses instead of the expected ones
+_SIGNAL_ALTS    = ("verdict", "recommendation", "direction", "stance", "rating", "view")
+_REASONING_ALTS = ("analysis", "explanation", "justification", "rationale", "notes", "comment")
 
 
 class WarrenBuffettSignal(BaseModel):
-    signal: Literal["bullish", "bearish", "neutral"]
-    confidence: int = Field(description="Confidence 0-100")
-    reasoning: str = Field(description="Reasoning for the decision")
+    signal:     Literal["bullish", "bearish", "neutral"] = "neutral"
+    confidence: float = Field(default=50.0, description="Confidence 0-100")
+    reasoning:  str   = Field(default="", description="Reasoning for the decision")
+
+    @model_validator(mode="before")
+    @classmethod
+    def remap_fields(cls, data):
+        """Accept alternative field names the LLM might use."""
+        if not isinstance(data, dict):
+            return data
+        if "signal" not in data:
+            for alt in _SIGNAL_ALTS:
+                if alt in data:
+                    data["signal"] = data[alt]
+                    break
+        if "reasoning" not in data:
+            for alt in _REASONING_ALTS:
+                if alt in data:
+                    data["reasoning"] = data[alt]
+                    break
+        return data
+
+    @field_validator("signal", mode="before")
+    @classmethod
+    def normalize_signal(cls, v):
+        s = str(v).lower().strip().rstrip(".")
+        return s if s in ("bullish", "bearish", "neutral") else "neutral"
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, v):
+        if v is None:
+            return 50.0
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return 50.0
+        if v <= 1.0:
+            return v * 100
+        return max(0.0, min(100.0, v))
 
 
 def warren_buffett_agent(state: AgentState, agent_id: str = "warren_buffett_agent"):
@@ -751,26 +793,30 @@ def generate_buffett_output(
 ) -> WarrenBuffettSignal:
     """Get investment decision from LLM with a compact prompt."""
 
-    # --- Build compact facts here ---
-    facts = {
-        "score": analysis_data.get("score"),
-        "max_score": analysis_data.get("max_score"),
-        "fundamentals": analysis_data.get("fundamental_analysis", {}).get("details"),
-        "consistency": analysis_data.get("consistency_analysis", {}).get("details"),
-        "moat": analysis_data.get("moat_analysis", {}).get("details"),
-        "pricing_power": analysis_data.get("pricing_power_analysis", {}).get("details"),
-        "book_value": analysis_data.get("book_value_analysis", {}).get("details"),
-        "management": analysis_data.get("management_analysis", {}).get("details"),
-        "intrinsic_value": analysis_data.get("intrinsic_value_analysis", {}).get("intrinsic_value"),
-        "market_cap": analysis_data.get("market_cap"),
-        "margin_of_safety": analysis_data.get("margin_of_safety"),
-    }
+    # ETFs and funds have no usable fundamental data — skip LLM entirely
+    score      = analysis_data.get("score", 0)
+    market_cap = analysis_data.get("market_cap")
+    has_data   = (
+        market_cap is not None
+        or score > 0
+        or analysis_data.get("intrinsic_value_analysis", {}).get("intrinsic_value") is not None
+    )
+    if not has_data:
+        return WarrenBuffettSignal(
+            signal="neutral",
+            confidence=50,
+            reasoning="No fundamental data available (ETF/fund or missing financials)",
+        )
+
+    data_ctx = get_data_context(state, ticker)
+    if data_ctx:
+        analysis_data["_data_context"] = data_ctx
 
     template = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
-                "You are Warren Buffett. Decide bullish, bearish, or neutral using only the provided facts.\n"
+                "You are Warren Buffett. Decide bullish, bearish, or neutral using all provided data.\n"
                 "\n"
                 "Checklist for decision:\n"
                 "- Circle of competence\n"
@@ -779,6 +825,7 @@ def generate_buffett_output(
                 "- Financial strength\n"
                 "- Valuation vs intrinsic value\n"
                 "- Long-term prospects\n"
+                "- Industry tailwinds / headwinds (from _data_context if present)\n"
                 "\n"
                 "Signal rules:\n"
                 "- Bullish: strong business AND margin_of_safety > 0.\n"
@@ -797,7 +844,7 @@ def generate_buffett_output(
             (
                 "human",
                 "Ticker: {ticker}\n"
-                "Facts:\n{facts}\n\n"
+                "Analysis Data:\n{analysis_data}\n\n"
                 "Return exactly:\n"
                 "{{\n"
                 '  "signal": "bullish" | "bearish" | "neutral",\n'
@@ -809,7 +856,7 @@ def generate_buffett_output(
     )
 
     prompt = template.invoke({
-        "facts": json.dumps(facts, separators=(",", ":"), ensure_ascii=False),
+        "analysis_data": json.dumps(analysis_data, indent=2),
         "ticker": ticker,
     })
 

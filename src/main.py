@@ -92,36 +92,59 @@ def run_hedge_fund(
         progress.stop()
 
 
+_DATA_AGENTS = {
+    "fundamentals_analyst", "technical_analyst", "sentiment_analyst", "valuation_analyst",
+    "market_signals_analyst", "macro_analyst", "earnings_analyst", "industry_analyst",
+}
+
+
 def start(state: AgentState):
     """Initialize the workflow with the input message."""
     return state
 
 
+def _data_sync(state: AgentState):
+    """Barrier node: all data agents must finish before LLM investors start."""
+    return state
+
+
 def create_workflow(selected_analysts=None):
-    """Create the workflow with selected analysts."""
+    """Create the workflow with two-phase execution: data agents → LLM investor agents."""
     workflow = StateGraph(AgentState)
     workflow.add_node("start_node", start)
+    workflow.add_node("data_sync_node", _data_sync)
 
-    # Get analyst nodes from the configuration
     analyst_nodes = get_analyst_nodes()
 
-    # Default to all analysts if none selected
     if selected_analysts is None:
         selected_analysts = list(analyst_nodes.keys())
-    # Add selected analyst nodes
-    for analyst_key in selected_analysts:
-        node_name, node_func = analyst_nodes[analyst_key]
-        workflow.add_node(node_name, node_func)
-        workflow.add_edge("start_node", node_name)
+
+    data_keys = [k for k in selected_analysts if k in _DATA_AGENTS]
+    llm_keys  = [k for k in selected_analysts if k not in _DATA_AGENTS]
+
+    # Phase 1: data agents (start_node → agent → data_sync_node)
+    if data_keys:
+        for key in data_keys:
+            node_name, node_func = analyst_nodes[key]
+            workflow.add_node(node_name, node_func)
+            workflow.add_edge("start_node", node_name)
+            workflow.add_edge(node_name, "data_sync_node")
+    else:
+        workflow.add_edge("start_node", "data_sync_node")
 
     # Always add risk and portfolio management
     workflow.add_node("risk_management_agent", risk_management_agent)
     workflow.add_node("portfolio_manager", portfolio_management_agent)
 
-    # Connect selected analysts to risk management
-    for analyst_key in selected_analysts:
-        node_name = analyst_nodes[analyst_key][0]
-        workflow.add_edge(node_name, "risk_management_agent")
+    # Phase 2: LLM investor agents (data_sync_node → agent → risk_management_agent)
+    if llm_keys:
+        for key in llm_keys:
+            node_name, node_func = analyst_nodes[key]
+            workflow.add_node(node_name, node_func)
+            workflow.add_edge("data_sync_node", node_name)
+            workflow.add_edge(node_name, "risk_management_agent")
+    else:
+        workflow.add_edge("data_sync_node", "risk_management_agent")
 
     workflow.add_edge("risk_management_agent", "portfolio_manager")
     workflow.add_edge("portfolio_manager", END)

@@ -40,6 +40,11 @@ def valuation_analyst_agent(state: AgentState, agent_id: str = "valuation_analys
         )
         if not financial_metrics:
             progress.update_status(agent_id, ticker, "Failed: No financial metrics found")
+            valuation_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: no financial metrics available",
+            }
             continue
         most_recent_metrics = financial_metrics[0]
 
@@ -54,7 +59,7 @@ def valuation_analyst_agent(state: AgentState, agent_id: str = "valuation_analys
                 "capital_expenditure",
                 "working_capital",
                 "total_debt",
-                "cash_and_equivalents", 
+                "cash_and_equivalents",
                 "interest_expense",
                 "revenue",
                 "operating_income",
@@ -68,6 +73,11 @@ def valuation_analyst_agent(state: AgentState, agent_id: str = "valuation_analys
         )
         if len(line_items) < 2:
             progress.update_status(agent_id, ticker, "Failed: Insufficient financial line items")
+            valuation_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: fewer than 2 periods of financial line items available",
+            }
             continue
         li_curr, li_prev = line_items[0], line_items[1]
 
@@ -139,6 +149,11 @@ def valuation_analyst_agent(state: AgentState, agent_id: str = "valuation_analys
         market_cap = get_market_cap(ticker, end_date, api_key=api_key)
         if not market_cap:
             progress.update_status(agent_id, ticker, "Failed: Market cap unavailable")
+            valuation_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: market cap unavailable",
+            }
             continue
 
         method_values = {
@@ -151,6 +166,11 @@ def valuation_analyst_agent(state: AgentState, agent_id: str = "valuation_analys
         total_weight = sum(v["weight"] for v in method_values.values() if v["value"] > 0)
         if total_weight == 0:
             progress.update_status(agent_id, ticker, "Failed: All valuation methods zero")
+            valuation_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: no usable valuation model inputs available",
+            }
             continue
 
         for v in method_values.values():

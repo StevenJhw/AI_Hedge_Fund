@@ -9,6 +9,7 @@ from src.utils.progress import progress
 from src.utils.llm import call_llm
 import math
 from src.utils.api_key import get_api_key_from_state
+from src.utils.data_context import get_data_context
 
 
 class BenGrahamSignal(BaseModel):
@@ -42,6 +43,16 @@ def ben_graham_agent(state: AgentState, agent_id: str = "ben_graham_agent"):
 
         progress.update_status(agent_id, ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date, api_key=api_key)
+
+        # Early exit if no data was fetched
+        if not metrics and not financial_line_items and market_cap is None:
+            graham_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: no financial metrics, line items, or market cap available",
+            }
+            progress.update_status(agent_id, ticker, "Done", analysis="Insufficient data")
+            continue
 
         # Perform sub-analyses
         progress.update_status(agent_id, ticker, "Analyzing earnings stability")
@@ -334,6 +345,9 @@ def generate_graham_output(
         ]
     )
 
+    data_ctx = get_data_context(state, ticker)
+    if data_ctx:
+        analysis_data["_data_context"] = data_ctx
     prompt = template.invoke({"analysis_data": json.dumps(analysis_data, indent=2), "ticker": ticker})
 
     def create_default_ben_graham_signal():

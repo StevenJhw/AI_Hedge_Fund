@@ -13,6 +13,7 @@ from typing_extensions import Literal
 from src.utils.progress import progress
 from src.utils.llm import call_llm
 from src.utils.api_key import get_api_key_from_state
+from src.utils.data_context import get_data_context
 
 
 class PeterLynchSignal(BaseModel):
@@ -79,6 +80,16 @@ def peter_lynch_agent(state: AgentState, agent_id: str = "peter_lynch_agent"):
 
         progress.update_status(agent_id, ticker, "Fetching company news")
         company_news = get_company_news(ticker, end_date, limit=50, api_key=api_key)
+
+        # Early exit if no data was fetched
+        if not financial_line_items and market_cap is None:
+            lynch_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: no financial line items or market cap available",
+            }
+            progress.update_status(agent_id, ticker, "Done", analysis="Insufficient data")
+            continue
 
         # Perform sub-analyses:
         progress.update_status(agent_id, ticker, "Analyzing growth")
@@ -489,6 +500,9 @@ def generate_lynch_output(
         ]
     )
 
+    data_ctx = get_data_context(state, ticker)
+    if data_ctx:
+        analysis_data["_data_context"] = data_ctx
     prompt = template.invoke({"analysis_data": json.dumps(analysis_data, indent=2), "ticker": ticker})
 
     def create_default_signal():

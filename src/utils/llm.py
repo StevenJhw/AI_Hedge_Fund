@@ -1,185 +1,155 @@
-"""Helper functions for LLM"""
+"""LLM calls — supports Groq (free) and DeepSeek (paid)."""
 
 import json
+import os
+import time
+import threading
 from pydantic import BaseModel
-from src.llm.models import get_model, get_model_info
 from src.utils.progress import progress
-from src.graph.state import AgentState
+
+# ── Runtime config ─────────────────────────────────────────────────────────────
+# Overridden per-call from state["metadata"] when available.
+_DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "Groq")      # "Groq" | "DeepSeek"
+_DEFAULT_MODEL    = os.getenv("GROQ_MODEL",   "llama-3.3-70b-versatile")
+
+# ── Groq rate-limiter (free tier: ~30 RPM) ─────────────────────────────────────
+_groq_lock      = threading.Lock()
+_groq_last_call = 0.0
+_GROQ_INTERVAL  = float(os.getenv("GROQ_MIN_INTERVAL", "2.1"))
+
+# ── Lazy clients ───────────────────────────────────────────────────────────────
+_groq_client     = None
+_deepseek_client = None
+
+
+def _get_groq():
+    global _groq_client
+    if _groq_client is None:
+        from groq import Groq
+        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _groq_client
+
+
+def _get_deepseek():
+    global _deepseek_client
+    if _deepseek_client is None:
+        from openai import OpenAI
+        _deepseek_client = OpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            base_url="https://api.deepseek.com",
+        )
+    return _deepseek_client
+
+
+def _throttle_groq():
+    global _groq_last_call
+    with _groq_lock:
+        now  = time.monotonic()
+        wait = _GROQ_INTERVAL - (now - _groq_last_call)
+        if wait > 0:
+            time.sleep(wait)
+        _groq_last_call = time.monotonic()
+
+
+def _prompt_to_messages(prompt) -> list[dict]:
+    if hasattr(prompt, "messages"):
+        result = []
+        for m in prompt.messages:
+            role = getattr(m, "type", "user")
+            role = "system" if role == "system" else "user"
+            result.append({"role": role, "content": str(m.content)})
+        return result
+    return [{"role": "user", "content": str(prompt)}]
+
+
+def _normalize(data: dict) -> dict:
+    """Normalize signal casing and confidence scale in-place."""
+    if "signal" in data and isinstance(data["signal"], str):
+        s = data["signal"].lower().strip().rstrip(".")
+        data["signal"] = s if s in ("bullish", "bearish", "neutral") else "neutral"
+    if "confidence" in data:
+        try:
+            v = float(data["confidence"])
+            if v <= 1.0:
+                v *= 100
+            data["confidence"] = max(0.0, min(100.0, v))
+        except (TypeError, ValueError):
+            data["confidence"] = 50.0
+    return data
 
 
 def call_llm(
-    prompt: any,
+    prompt,
     pydantic_model: type[BaseModel],
     agent_name: str | None = None,
-    state: AgentState | None = None,
+    state=None,
     max_retries: int = 3,
     default_factory=None,
 ) -> BaseModel:
-    """
-    Makes an LLM call with retry logic, handling both JSON supported and non-JSON supported models.
+    # Resolve provider + model from state metadata (set by run.py) or env defaults
+    metadata = (state or {}).get("metadata", {})
+    provider = metadata.get("model_provider", _DEFAULT_PROVIDER)
+    model    = metadata.get("model_name",     _DEFAULT_MODEL)
 
-    Args:
-        prompt: The prompt to send to the LLM
-        pydantic_model: The Pydantic model class to structure the output
-        agent_name: Optional name of the agent for progress updates and model config extraction
-        state: Optional state object to extract agent-specific model configuration
-        max_retries: Maximum number of retries (default: 3)
-        default_factory: Optional factory function to create default response on failure
+    messages = _prompt_to_messages(prompt)
+    use_deepseek = provider.lower() == "deepseek"
 
-    Returns:
-        An instance of the specified Pydantic model
-    """
-    
-    # Extract model configuration if state is provided and agent_name is available
-    if state and agent_name:
-        model_name, model_provider = get_agent_model_config(state, agent_name)
-    else:
-        # Use system defaults when no state or agent_name is provided
-        model_name = "gpt-4.1"
-        model_provider = "OPENAI"
-
-    # Extract API keys from state if available
-    api_keys = None
-    if state:
-        request = state.get("metadata", {}).get("request")
-        if request and hasattr(request, 'api_keys'):
-            api_keys = request.api_keys
-
-    model_info = get_model_info(model_name, model_provider)
-    llm = get_model(model_name, model_provider, api_keys)
-
-    # For non-JSON support models, we can use structured output
-    if not (model_info and not model_info.has_json_mode()):
-        llm = llm.with_structured_output(
-            pydantic_model,
-            method="json_mode",
-        )
-
-    # Call the LLM with retries
     for attempt in range(max_retries):
-        try:
-            # Call the LLM
-            result = llm.invoke(prompt)
+        if not use_deepseek:
+            _throttle_groq()
 
-            # For non-JSON support models, we need to extract and parse the JSON manually
-            if model_info and not model_info.has_json_mode():
-                parsed_result = extract_json_from_response(result.content)
-                if parsed_result:
-                    return pydantic_model(**parsed_result)
+        try:
+            if use_deepseek:
+                resp = _get_deepseek().chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                )
             else:
-                return result
+                resp = _get_groq().chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                )
+
+            raw  = resp.choices[0].message.content
+            data = _normalize(json.loads(raw))
+            return pydantic_model(**data)
 
         except Exception as e:
-            if agent_name:
-                progress.update_status(agent_name, None, f"Error - retry {attempt + 1}/{max_retries}")
-
-            if attempt == max_retries - 1:
-                print(f"Error in LLM call after {max_retries} attempts: {e}")
-                # Use default_factory if provided, otherwise create a basic default
-                if default_factory:
-                    return default_factory()
-                return create_default_response(pydantic_model)
-
-    # This should never be reached due to the retry logic above
-    return create_default_response(pydantic_model)
-
-
-def create_default_response(model_class: type[BaseModel]) -> BaseModel:
-    """Creates a safe default response based on the model's fields."""
-    default_values = {}
-    for field_name, field in model_class.model_fields.items():
-        if field.annotation == str:
-            default_values[field_name] = "Error in analysis, using default"
-        elif field.annotation == float:
-            default_values[field_name] = 0.0
-        elif field.annotation == int:
-            default_values[field_name] = 0
-        elif hasattr(field.annotation, "__origin__") and field.annotation.__origin__ == dict:
-            default_values[field_name] = {}
-        else:
-            # For other types (like Literal), try to use the first allowed value
-            if hasattr(field.annotation, "__args__"):
-                default_values[field_name] = field.annotation.__args__[0]
+            err = str(e)
+            # Rate limit handling
+            is_rate_limit = "429" in err or "rate_limit" in err.lower() or "rate limit" in err.lower()
+            if is_rate_limit:
+                wait = 5 * (attempt + 1)
+                if agent_name:
+                    progress.update_status(agent_name, None, f"Rate-limited — waiting {wait}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait)
             else:
-                default_values[field_name] = None
+                if agent_name:
+                    progress.update_status(agent_name, None, f"Error - retry {attempt + 1}/{max_retries}")
+            if attempt == max_retries - 1:
+                if not is_rate_limit:
+                    print(f"[LLM] Error after {max_retries} attempts ({provider}): {e}")
+                return default_factory() if default_factory else _default_response(pydantic_model)
 
-    return model_class(**default_values)
-
-
-def extract_json_from_response(content: str) -> dict | None:
-    """Extracts JSON from a response, handling markdown-wrapped and raw JSON formats."""
-    try:
-        # 1. Try markdown code block with ```json
-        json_start = content.find("```json")
-        if json_start != -1:
-            json_text = content[json_start + 7:]  # Skip past ```json
-            json_end = json_text.find("```")
-            if json_end != -1:
-                json_text = json_text[:json_end].strip()
-                try:
-                    return json.loads(json_text)
-                except json.JSONDecodeError:
-                    pass
-
-        # 2. Try markdown code block without json specifier
-        json_start = content.find("```")
-        if json_start != -1:
-            json_text = content[json_start + 3:]
-            json_end = json_text.find("```")
-            if json_end != -1:
-                json_text = json_text[:json_end].strip()
-                try:
-                    return json.loads(json_text)
-                except json.JSONDecodeError:
-                    pass
-
-        # 3. Try to parse the entire content as JSON
-        try:
-            return json.loads(content.strip())
-        except json.JSONDecodeError:
-            pass
-
-        # 4. Find the first top-level JSON object by matching braces
-        brace_start = content.find("{")
-        if brace_start != -1:
-            depth = 0
-            for i, char in enumerate(content[brace_start:], brace_start):
-                if char == "{":
-                    depth += 1
-                elif char == "}":
-                    depth -= 1
-                    if depth == 0:
-                        try:
-                            return json.loads(content[brace_start:i + 1])
-                        except json.JSONDecodeError:
-                            break
-
-    except Exception as e:
-        print(f"Error extracting JSON from response: {e}")
-    return None
+    return _default_response(pydantic_model)
 
 
-def get_agent_model_config(state, agent_name):
-    """
-    Get model configuration for a specific agent from the state.
-    Falls back to global model configuration if agent-specific config is not available.
-    Always returns valid model_name and model_provider values.
-    """
-    request = state.get("metadata", {}).get("request")
-    
-    if request and hasattr(request, 'get_agent_model_config'):
-        # Get agent-specific model configuration
-        model_name, model_provider = request.get_agent_model_config(agent_name)
-        # Ensure we have valid values
-        if model_name and model_provider:
-            return model_name, model_provider.value if hasattr(model_provider, 'value') else str(model_provider)
-    
-    # Fall back to global configuration (system defaults)
-    model_name = state.get("metadata", {}).get("model_name") or "gpt-4.1"
-    model_provider = state.get("metadata", {}).get("model_provider") or "OPENAI"
-    
-    # Convert enum to string if necessary
-    if hasattr(model_provider, 'value'):
-        model_provider = model_provider.value
-    
-    return model_name, model_provider
+def _default_response(model_class: type[BaseModel]) -> BaseModel:
+    defaults = {}
+    for name, field in model_class.model_fields.items():
+        ann = field.annotation
+        if ann == str:
+            defaults[name] = "Error in analysis"
+        elif ann in (float, int):
+            defaults[name] = 0
+        elif hasattr(ann, "__origin__") and ann.__origin__ == dict:
+            defaults[name] = {}
+        elif hasattr(ann, "__args__"):
+            defaults[name] = ann.__args__[0]
+        else:
+            defaults[name] = None
+    return model_class(**defaults)

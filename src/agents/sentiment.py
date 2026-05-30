@@ -60,6 +60,17 @@ def sentiment_analyst_agent(state: AgentState, agent_id: str = "sentiment_analys
             news_signals.count("bearish") * news_weight
         )
 
+        # No data available — flag clearly rather than fabricating a conclusion
+        no_data = len(insider_signals) == 0 and len(news_signals) == 0
+        if no_data:
+            sentiment_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: no insider trades or news articles found",
+            }
+            progress.update_status(agent_id, ticker, "Done", analysis="Insufficient data")
+            continue
+
         if bullish_signals > bearish_signals:
             overall_signal = "bullish"
         elif bearish_signals > bullish_signals:
@@ -67,47 +78,32 @@ def sentiment_analyst_agent(state: AgentState, agent_id: str = "sentiment_analys
         else:
             overall_signal = "neutral"
 
-        # Calculate confidence level based on the weighted proportion
         total_weighted_signals = len(insider_signals) * insider_weight + len(news_signals) * news_weight
-        confidence = 0  # Default confidence when there are no signals
+        confidence = 0
         if total_weighted_signals > 0:
             confidence = round((max(bullish_signals, bearish_signals) / total_weighted_signals) * 100, 2)
-        
-        # Create structured reasoning similar to technical analysis
-        reasoning = {
-            "insider_trading": {
-                "signal": "bullish" if insider_signals.count("bullish") > insider_signals.count("bearish") else 
-                         "bearish" if insider_signals.count("bearish") > insider_signals.count("bullish") else "neutral",
-                "confidence": round((max(insider_signals.count("bullish"), insider_signals.count("bearish")) / max(len(insider_signals), 1)) * 100),
-                "metrics": {
-                    "total_trades": len(insider_signals),
-                    "bullish_trades": insider_signals.count("bullish"),
-                    "bearish_trades": insider_signals.count("bearish"),
-                    "weight": insider_weight,
-                    "weighted_bullish": round(insider_signals.count("bullish") * insider_weight, 1),
-                    "weighted_bearish": round(insider_signals.count("bearish") * insider_weight, 1),
-                }
-            },
-            "news_sentiment": {
-                "signal": "bullish" if news_signals.count("bullish") > news_signals.count("bearish") else 
-                         "bearish" if news_signals.count("bearish") > news_signals.count("bullish") else "neutral",
-                "confidence": round((max(news_signals.count("bullish"), news_signals.count("bearish")) / max(len(news_signals), 1)) * 100),
-                "metrics": {
-                    "total_articles": len(news_signals),
-                    "bullish_articles": news_signals.count("bullish"),
-                    "bearish_articles": news_signals.count("bearish"),
-                    "neutral_articles": news_signals.count("neutral"),
-                    "weight": news_weight,
-                    "weighted_bullish": round(news_signals.count("bullish") * news_weight, 1),
-                    "weighted_bearish": round(news_signals.count("bearish") * news_weight, 1),
-                }
-            },
-            "combined_analysis": {
-                "total_weighted_bullish": round(bullish_signals, 1),
-                "total_weighted_bearish": round(bearish_signals, 1),
-                "signal_determination": f"{'Bullish' if bullish_signals > bearish_signals else 'Bearish' if bearish_signals > bullish_signals else 'Neutral'} based on weighted signal comparison"
-            }
-        }
+
+        n_trades   = len(insider_signals)
+        n_articles = len(news_signals)
+        bull_t = insider_signals.count("bullish")
+        bear_t = insider_signals.count("bearish")
+        bull_n = news_signals.count("bullish")
+        bear_n = news_signals.count("bearish")
+
+        # Include up to 5 most recent headlines for downstream synthesis
+        top_headlines = [
+            f"[{n.sentiment or 'neutral'}] {n.title}"
+            for n in company_news[:5]
+            if n.title
+        ]
+        headlines_str = " | ".join(top_headlines) if top_headlines else "none"
+
+        reasoning = (
+            f"Insider trades: {n_trades} ({bull_t} buy / {bear_t} sell). "
+            f"News articles: {n_articles} ({bull_n} bullish / {bear_n} bearish). "
+            f"Weighted signal: {overall_signal} at {confidence:.0f}% confidence. "
+            f"Headlines: {headlines_str}"
+        )
 
         sentiment_analysis[ticker] = {
             "signal": overall_signal,

@@ -21,6 +21,7 @@ from src.tools.api import (
 from src.utils.llm import call_llm
 from src.utils.progress import progress
 from src.utils.api_key import get_api_key_from_state
+from src.utils.data_context import get_data_context
 
 
 class NassimTalebSignal(BaseModel):
@@ -80,6 +81,16 @@ def nassim_taleb_agent(state: AgentState, agent_id: str = "nassim_taleb_agent"):
 
         progress.update_status(agent_id, ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date, api_key=api_key)
+
+        # Early exit if no data was fetched
+        if not metrics and not line_items and market_cap is None:
+            taleb_analysis[ticker] = {
+                "signal": "neutral",
+                "confidence": 0,
+                "reasoning": "Insufficient data: no financial metrics, line items, or market cap available",
+            }
+            progress.update_status(agent_id, ticker, "Done", analysis="Insufficient data")
+            continue
 
         # Run sub-analyses
         progress.update_status(agent_id, ticker, "Analyzing tail risk")
@@ -688,24 +699,15 @@ def generate_taleb_output(
 ) -> NassimTalebSignal:
     """Get investment decision from LLM with a compact prompt."""
 
-    facts = {
-        "score": analysis_data.get("score"),
-        "max_score": analysis_data.get("max_score"),
-        "tail_risk": analysis_data.get("tail_risk_analysis", {}).get("details"),
-        "antifragility": analysis_data.get("antifragility_analysis", {}).get("details"),
-        "convexity": analysis_data.get("convexity_analysis", {}).get("details"),
-        "fragility": analysis_data.get("fragility_analysis", {}).get("details"),
-        "skin_in_game": analysis_data.get("skin_in_game_analysis", {}).get("details"),
-        "volatility_regime": analysis_data.get("volatility_regime_analysis", {}).get("details"),
-        "black_swan": analysis_data.get("black_swan_analysis", {}).get("details"),
-        "market_cap": analysis_data.get("market_cap"),
-    }
+    data_ctx = get_data_context(state, ticker)
+    if data_ctx:
+        analysis_data["_data_context"] = data_ctx
 
     template = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
-                "You are Nassim Taleb. Decide bullish, bearish, or neutral using only the provided facts.\n"
+                "You are Nassim Taleb. Decide bullish, bearish, or neutral using all provided data.\n"
                 "\n"
                 "Checklist for decision:\n"
                 "- Antifragility (benefits from disorder)\n"
@@ -714,6 +716,7 @@ def generate_taleb_output(
                 "- Fragility via negativa (avoid the fragile)\n"
                 "- Skin in the game (insider alignment)\n"
                 "- Volatility regime (low vol = danger)\n"
+                "- Industry tailwinds / systemic risk (from _data_context if present)\n"
                 "\n"
                 "Signal rules:\n"
                 "- Bullish: antifragile business with convex payoff AND not fragile.\n"
@@ -733,7 +736,7 @@ def generate_taleb_output(
             (
                 "human",
                 "Ticker: {ticker}\n"
-                "Facts:\n{facts}\n\n"
+                "Analysis Data:\n{analysis_data}\n\n"
                 "Return exactly:\n"
                 "{{\n"
                 '  "signal": "bullish" | "bearish" | "neutral",\n'
@@ -745,7 +748,7 @@ def generate_taleb_output(
     )
 
     prompt = template.invoke({
-        "facts": json.dumps(facts, separators=(",", ":"), ensure_ascii=False),
+        "analysis_data": json.dumps(analysis_data, indent=2),
         "ticker": ticker,
     })
 
