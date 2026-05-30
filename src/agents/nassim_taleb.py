@@ -32,6 +32,8 @@ class NassimTalebSignal(BaseModel):
 
 def nassim_taleb_agent(state: AgentState, agent_id: str = "nassim_taleb_agent"):
     """Analyzes stocks using Taleb's antifragility, tail risk, and convexity principles."""
+    from src.data.prefetch import get_raw_data
+
     data = state["data"]
     end_date = data["end_date"]
     tickers = data["tickers"]
@@ -44,43 +46,39 @@ def nassim_taleb_agent(state: AgentState, agent_id: str = "nassim_taleb_agent"):
     taleb_analysis = {}
 
     for ticker in tickers:
-        progress.update_status(agent_id, ticker, "Fetching price data")
-        prices = get_prices(ticker, start_date, end_date, api_key=api_key)
-        prices_df = prices_to_df(prices) if prices else pd.DataFrame()
+        raw = get_raw_data(state, ticker)
 
-        progress.update_status(agent_id, ticker, "Fetching financial metrics")
-        metrics = get_financial_metrics(ticker, end_date, period="ttm", limit=10, api_key=api_key)
+        progress.update_status(agent_id, ticker, "Loading price data")
+        if raw.get("prices"):
+            prices = raw["prices"]
+            prices_df = raw.get("prices_df") if raw.get("prices_df") is not None else (prices_to_df(prices) if prices else pd.DataFrame())
+        else:
+            prices = get_prices(ticker, start_date, end_date, api_key=api_key)
+            prices_df = prices_to_df(prices) if prices else pd.DataFrame()
 
-        progress.update_status(agent_id, ticker, "Gathering financial line items")
-        line_items = search_line_items(
-            ticker,
-            [
-                "free_cash_flow",
-                "net_income",
-                "total_debt",
-                "cash_and_equivalents",
-                "total_assets",
-                "total_liabilities",
-                "revenue",
-                "operating_income",
-                "research_and_development",
-                "capital_expenditure",
-                "outstanding_shares",
-            ],
-            end_date,
-            period="ttm",
-            limit=5,
-            api_key=api_key,
-        )
+        progress.update_status(agent_id, ticker, "Loading financial metrics")
+        metrics = raw.get("financial_metrics") or get_financial_metrics(ticker, end_date, period="ttm", limit=10, api_key=api_key)
 
-        progress.update_status(agent_id, ticker, "Fetching insider trades")
-        insider_trades = get_insider_trades(ticker, end_date=end_date, start_date=start_date)
+        progress.update_status(agent_id, ticker, "Loading financial line items")
+        if raw.get("line_items"):
+            line_items = raw["line_items"]
+        else:
+            line_items = search_line_items(
+                ticker,
+                ["free_cash_flow", "net_income", "total_debt", "cash_and_equivalents",
+                 "total_assets", "total_liabilities", "revenue", "operating_income",
+                 "research_and_development", "capital_expenditure", "outstanding_shares"],
+                end_date, period="ttm", limit=5, api_key=api_key,
+            )
 
-        progress.update_status(agent_id, ticker, "Fetching company news")
-        news = get_company_news(ticker, end_date=end_date, start_date=start_date, limit=100)
+        progress.update_status(agent_id, ticker, "Loading insider trades")
+        insider_trades = raw.get("insider_trades") or get_insider_trades(ticker, end_date=end_date, start_date=start_date)
 
-        progress.update_status(agent_id, ticker, "Getting market cap")
-        market_cap = get_market_cap(ticker, end_date, api_key=api_key)
+        progress.update_status(agent_id, ticker, "Loading company news")
+        news = raw.get("company_news") or get_company_news(ticker, end_date=end_date, start_date=start_date, limit=100)
+
+        progress.update_status(agent_id, ticker, "Loading market cap")
+        market_cap = raw.get("market_cap") if raw else get_market_cap(ticker, end_date, api_key=api_key)
 
         # Early exit if no data was fetched
         if not metrics and not line_items and market_cap is None:

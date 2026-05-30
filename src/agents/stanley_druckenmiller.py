@@ -34,6 +34,8 @@ def stanley_druckenmiller_agent(state: AgentState, agent_id: str = "stanley_druc
 
     Returns a bullish/bearish/neutral signal with confidence and reasoning.
     """
+    from src.data.prefetch import get_raw_data
+
     data = state["data"]
     start_date = data["start_date"]
     end_date = data["end_date"]
@@ -43,50 +45,35 @@ def stanley_druckenmiller_agent(state: AgentState, agent_id: str = "stanley_druc
     druck_analysis = {}
 
     for ticker in tickers:
-        progress.update_status(agent_id, ticker, "Fetching financial metrics")
-        metrics = get_financial_metrics(ticker, end_date, period="annual", limit=5, api_key=api_key)
+        raw = get_raw_data(state, ticker)
 
-        progress.update_status(agent_id, ticker, "Gathering financial line items")
-        # Include relevant line items for Stan Druckenmiller's approach:
-        #   - Growth & momentum: revenue, EPS, operating_income, ...
-        #   - Valuation: net_income, free_cash_flow, ebit, ebitda
-        #   - Leverage: total_debt, shareholders_equity
-        #   - Liquidity: cash_and_equivalents
-        financial_line_items = search_line_items(
-            ticker,
-            [
-                "revenue",
-                "earnings_per_share",
-                "net_income",
-                "operating_income",
-                "gross_margin",
-                "operating_margin",
-                "free_cash_flow",
-                "capital_expenditure",
-                "cash_and_equivalents",
-                "total_debt",
-                "shareholders_equity",
-                "outstanding_shares",
-                "ebit",
-                "ebitda",
-            ],
-            end_date,
-            period="annual",
-            limit=5,
-            api_key=api_key,
-        )
+        progress.update_status(agent_id, ticker, "Loading financial metrics")
+        metrics = raw.get("financial_metrics") or get_financial_metrics(ticker, end_date, period="annual", limit=5, api_key=api_key)
 
-        progress.update_status(agent_id, ticker, "Getting market cap")
-        market_cap = get_market_cap(ticker, end_date, api_key=api_key)
+        progress.update_status(agent_id, ticker, "Loading financial line items")
+        if raw.get("line_items"):
+            financial_line_items = raw["line_items"]
+        else:
+            financial_line_items = search_line_items(
+                ticker,
+                ["revenue", "earnings_per_share", "net_income", "operating_income",
+                 "gross_margin", "operating_margin", "free_cash_flow", "capital_expenditure",
+                 "cash_and_equivalents", "total_debt", "shareholders_equity",
+                 "outstanding_shares", "ebit", "ebitda"],
+                end_date, period="annual", limit=5, api_key=api_key,
+            )
 
-        progress.update_status(agent_id, ticker, "Fetching insider trades")
-        insider_trades = get_insider_trades(ticker, end_date, limit=50, api_key=api_key)
+        progress.update_status(agent_id, ticker, "Loading market cap")
+        market_cap = raw.get("market_cap") if raw else get_market_cap(ticker, end_date, api_key=api_key)
 
-        progress.update_status(agent_id, ticker, "Fetching company news")
-        company_news = get_company_news(ticker, end_date, limit=50, api_key=api_key)
+        progress.update_status(agent_id, ticker, "Loading insider trades")
+        insider_trades = raw.get("insider_trades") or get_insider_trades(ticker, end_date, limit=50, api_key=api_key)
 
-        progress.update_status(agent_id, ticker, "Fetching recent price data for momentum")
-        prices = get_prices(ticker, start_date=start_date, end_date=end_date, api_key=api_key)
+        progress.update_status(agent_id, ticker, "Loading company news")
+        company_news = raw.get("company_news") or get_company_news(ticker, end_date, limit=50, api_key=api_key)
+
+        progress.update_status(agent_id, ticker, "Loading price data for momentum")
+        prices = raw.get("prices") or get_prices(ticker, start_date=start_date, end_date=end_date, api_key=api_key)
 
         # Early exit if no data was fetched
         if not metrics and not financial_line_items and market_cap is None:

@@ -60,6 +60,8 @@ class WarrenBuffettSignal(BaseModel):
 
 def warren_buffett_agent(state: AgentState, agent_id: str = "warren_buffett_agent"):
     """Analyzes stocks using Buffett's principles and LLM reasoning."""
+    from src.data.prefetch import get_raw_data
+
     data = state["data"]
     end_date = data["end_date"]
     tickers = data["tickers"]
@@ -69,36 +71,33 @@ def warren_buffett_agent(state: AgentState, agent_id: str = "warren_buffett_agen
     buffett_analysis = {}
 
     for ticker in tickers:
-        progress.update_status(agent_id, ticker, "Fetching financial metrics")
-        # Fetch required data - request more periods for better trend analysis
-        metrics = get_financial_metrics(ticker, end_date, period="ttm", limit=10, api_key=api_key)
+        # 从预加载数据读取，如果没有则降级自己拉
+        raw = get_raw_data(state, ticker)
 
-        progress.update_status(agent_id, ticker, "Gathering financial line items")
-        financial_line_items = search_line_items(
-            ticker,
-            [
-                "capital_expenditure",
-                "depreciation_and_amortization",
-                "net_income",
-                "outstanding_shares",
-                "total_assets",
-                "total_liabilities",
-                "shareholders_equity",
-                "dividends_and_other_cash_distributions",
-                "issuance_or_purchase_of_equity_shares",
-                "gross_profit",
-                "revenue",
-                "free_cash_flow",
-            ],
-            end_date,
-            period="ttm",
-            limit=10,
-            api_key=api_key,
-        )
+        progress.update_status(agent_id, ticker, "Loading financial metrics")
+        if raw.get("financial_metrics"):
+            metrics = raw["financial_metrics"]
+        else:
+            metrics = get_financial_metrics(ticker, end_date, period="ttm", limit=10, api_key=api_key)
 
-        progress.update_status(agent_id, ticker, "Getting market cap")
-        # Get current market cap
-        market_cap = get_market_cap(ticker, end_date, api_key=api_key)
+        progress.update_status(agent_id, ticker, "Loading financial line items")
+        if raw.get("line_items"):
+            financial_line_items = raw["line_items"]
+        else:
+            financial_line_items = search_line_items(
+                ticker,
+                [
+                    "capital_expenditure", "depreciation_and_amortization", "net_income",
+                    "outstanding_shares", "total_assets", "total_liabilities",
+                    "shareholders_equity", "dividends_and_other_cash_distributions",
+                    "issuance_or_purchase_of_equity_shares", "gross_profit", "revenue",
+                    "free_cash_flow",
+                ],
+                end_date, period="ttm", limit=10, api_key=api_key,
+            )
+
+        progress.update_status(agent_id, ticker, "Loading market cap")
+        market_cap = raw.get("market_cap") if raw else get_market_cap(ticker, end_date, api_key=api_key)
 
         progress.update_status(agent_id, ticker, "Analyzing fundamentals")
         # Analyze fundamentals

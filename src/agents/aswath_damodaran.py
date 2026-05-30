@@ -34,6 +34,8 @@ def aswath_damodaran_agent(state: AgentState, agent_id: str = "aswath_damodaran_
       • Cross-check with relative valuation (PE vs. Fwd PE sector median proxy)
     Produces a trading signal and explanation in Damodaran's analytical voice.
     """
+    from src.data.prefetch import get_raw_data
+
     data      = state["data"]
     end_date  = data["end_date"]
     tickers   = data["tickers"]
@@ -43,29 +45,25 @@ def aswath_damodaran_agent(state: AgentState, agent_id: str = "aswath_damodaran_
     damodaran_signals: dict[str, dict] = {}
 
     for ticker in tickers:
-        # ─── Fetch core data ────────────────────────────────────────────────────
-        progress.update_status(agent_id, ticker, "Fetching financial metrics")
-        metrics = get_financial_metrics(ticker, end_date, period="ttm", limit=5, api_key=api_key)
+        raw = get_raw_data(state, ticker)
 
-        progress.update_status(agent_id, ticker, "Fetching financial line items")
-        line_items = search_line_items(
-            ticker,
-            [
-                "free_cash_flow",
-                "ebit",
-                "interest_expense",
-                "capital_expenditure",
-                "depreciation_and_amortization",
-                "outstanding_shares",
-                "net_income",
-                "total_debt",
-            ],
-            end_date,
-            api_key=api_key,
-        )
+        # ─── Load core data from prefetch ───────────────────────────────────────
+        progress.update_status(agent_id, ticker, "Loading financial metrics")
+        metrics = raw.get("financial_metrics") or get_financial_metrics(ticker, end_date, period="ttm", limit=5, api_key=api_key)
 
-        progress.update_status(agent_id, ticker, "Getting market cap")
-        market_cap = get_market_cap(ticker, end_date, api_key=api_key)
+        progress.update_status(agent_id, ticker, "Loading financial line items")
+        if raw.get("line_items"):
+            line_items = raw["line_items"]
+        else:
+            line_items = search_line_items(
+                ticker,
+                ["free_cash_flow", "ebit", "interest_expense", "capital_expenditure",
+                 "depreciation_and_amortization", "outstanding_shares", "net_income", "total_debt"],
+                end_date, api_key=api_key,
+            )
+
+        progress.update_status(agent_id, ticker, "Loading market cap")
+        market_cap = raw.get("market_cap") if raw else get_market_cap(ticker, end_date, api_key=api_key)
 
         # Early exit if no data was fetched
         if not metrics and not line_items and market_cap is None:

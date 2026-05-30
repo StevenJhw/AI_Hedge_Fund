@@ -25,6 +25,8 @@ def cathie_wood_agent(state: AgentState, agent_id: str = "cathie_wood_agent"):
     3. Invests mostly in AI, robotics, genomic sequencing, fintech, and blockchain.
     4. Willing to endure short-term volatility for long-term gains.
     """
+    from src.data.prefetch import get_raw_data
+
     data = state["data"]
     end_date = data["end_date"]
     tickers = data["tickers"]
@@ -33,35 +35,29 @@ def cathie_wood_agent(state: AgentState, agent_id: str = "cathie_wood_agent"):
     cw_analysis = {}
 
     for ticker in tickers:
-        progress.update_status(agent_id, ticker, "Fetching financial metrics")
-        metrics = get_financial_metrics(ticker, end_date, period="annual", limit=5, api_key=api_key)
+        raw = get_raw_data(state, ticker)
 
-        progress.update_status(agent_id, ticker, "Gathering financial line items")
-        # Request multiple periods of data (annual or TTM) for a more robust view.
-        financial_line_items = search_line_items(
-            ticker,
-            [
-                "revenue",
-                "gross_margin",
-                "operating_margin",
-                "debt_to_equity",
-                "free_cash_flow",
-                "total_assets",
-                "total_liabilities",
-                "dividends_and_other_cash_distributions",
-                "outstanding_shares",
-                "research_and_development",
-                "capital_expenditure",
-                "operating_expense",
-            ],
-            end_date,
-            period="annual",
-            limit=5,
-            api_key=api_key,
-        )
+        progress.update_status(agent_id, ticker, "Loading financial metrics")
+        if raw.get("financial_metrics"):
+            metrics = raw["financial_metrics"]
+        else:
+            metrics = get_financial_metrics(ticker, end_date, period="annual", limit=5, api_key=api_key)
 
-        progress.update_status(agent_id, ticker, "Getting market cap")
-        market_cap = get_market_cap(ticker, end_date, api_key=api_key)
+        progress.update_status(agent_id, ticker, "Loading financial line items")
+        if raw.get("line_items"):
+            financial_line_items = raw["line_items"]
+        else:
+            financial_line_items = search_line_items(
+                ticker,
+                ["revenue", "gross_margin", "operating_margin", "debt_to_equity",
+                 "free_cash_flow", "total_assets", "total_liabilities",
+                 "dividends_and_other_cash_distributions", "outstanding_shares",
+                 "research_and_development", "capital_expenditure", "operating_expense"],
+                end_date, period="annual", limit=5, api_key=api_key,
+            )
+
+        progress.update_status(agent_id, ticker, "Loading market cap")
+        market_cap = raw.get("market_cap") if raw else get_market_cap(ticker, end_date, api_key=api_key)
 
         # Require at least one period of metrics OR line items OR a market cap —
         # if all three are absent there is nothing for the LLM to reason about.
